@@ -34,6 +34,7 @@ static void net_xdma_rewrite_headers(struct net_xdma_priv *priv,
 					struct sk_buff *skb, size_t frame_len)
 {
 	struct ethhdr *eth;
+	u32 tmp_addr;
 
 	if (!netxdma_param_lo || frame_len < sizeof(*eth))
 		return;
@@ -44,8 +45,9 @@ static void net_xdma_rewrite_headers(struct net_xdma_priv *priv,
 	if (eth->h_proto == htons(ETH_P_IP)) {
 		struct iphdr *iph = (struct iphdr *)(skb->data + sizeof(struct ethhdr));
 		if ((u8 *)iph + sizeof(struct iphdr) <= skb_tail_pointer(skb)) {
-			iph->saddr = htonl(0x7f000001);
-			iph->daddr = htonl(0x7f000001);
+			tmp_addr = iph->saddr;
+			iph->saddr = iph->daddr;
+			iph->daddr = tmp_addr;
 			iph->check = 0;
 			iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
