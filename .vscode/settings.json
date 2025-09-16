@@ -1,0 +1,21 @@
+{
+    "editor.fontSize": 20,
+	"search.exclude": {
+        "**/*.o": true,
+        "**/*.cmd": true,
+		"**/*.symvers": true,
+		"**/*.mod.c": true,
+		"**/*.order": true,
+		"**/.tmp_versions": true,
+        "**/*.ko": true
+    },
+    "files.exclude": {
+        "**/*.o": true,
+        "**/*.cmd": true,
+		"**/*.symvers": true,
+		"**/*.mod.c": true,
+		"**/*.order": true,
+		"**/.tmp_versions": true,
+        "**/*.ko": true
+    }
+}
