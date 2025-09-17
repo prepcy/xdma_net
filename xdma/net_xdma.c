@@ -13,6 +13,7 @@
 #include <linux/pci.h>
 #include <linux/scatterlist.h>
 #include <linux/ip.h>
+#include <linux/if_arp.h>
 #include "libxdma_api.h"
 
 static bool netxdma_param_lo = false;
@@ -52,6 +53,40 @@ static void net_xdma_rewrite_headers(struct net_xdma_priv *priv,
 			iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
 		}
+	} else if (eth->h_proto == htons(ETH_P_ARP)) {
+		struct arphdr *arph = (struct arphdr *)(skb->data + sizeof(struct ethhdr));
+		u8 *arp_ptr;
+		u8 *sha, *tha;
+		__be32 *spa, *tpa;
+
+		if ((u8 *)arph + sizeof(struct arphdr) > skb_tail_pointer(skb))
+			return;
+		/* Only handle Ethernet/IPv4 ARP */
+		if (arph->ar_hrd != htons(ARPHRD_ETHER) ||
+		    arph->ar_pro != htons(ETH_P_IP) ||
+		    arph->ar_hln != ETH_ALEN ||
+		    arph->ar_pln != 4)
+			return;
+
+		arp_ptr = (u8 *)(arph + 1);
+		/* Layout: sha(6) spa(4) tha(6) tpa(4) */
+		if (arp_ptr + ETH_ALEN + 4 + ETH_ALEN + 4 > skb_tail_pointer(skb))
+			return;
+
+		sha = arp_ptr;
+		spa = (__be32 *)(arp_ptr + ETH_ALEN);
+		tha = arp_ptr + ETH_ALEN + 4;
+		tpa = (__be32 *)(arp_ptr + ETH_ALEN + 4 + ETH_ALEN);
+
+		/* Swap protocol (IP) addresses */
+		tmp_addr = *(__force u32 *)spa;
+		*(__force u32 *)spa = *(__force u32 *)tpa;
+		*(__force u32 *)tpa = tmp_addr;
+
+		/* Turn into a reply and set hardware addrs to our MAC */
+		arph->ar_op = htons(ARPOP_REPLY);
+		ether_addr_copy(sha, priv->netdev->dev_addr);
+		ether_addr_copy(tha, priv->netdev->dev_addr);
 	}
 }
 
@@ -89,7 +124,7 @@ static int net_xdma_tx_send_buf(struct net_xdma_priv *priv,
 	sgt.orig_nents = 1;
 
 	rv = xdma_xfer_submit(priv->xdev_hndl, priv->h2c_ch, true, pos, &sgt,
-			       false, 10000);
+			       false, 1000);
 
 	sg_free_table(&sgt);
 	return rv;
@@ -159,7 +194,7 @@ static int net_xdma_rx_thread(void *data)
 		sgt.orig_nents = 1;
 
 		/* Perform C2H DMA read into kbuf */
-		got = xdma_xfer_submit(priv->xdev_hndl, priv->c2h_ch, false, pos, &sgt, false, 10000);
+		got = xdma_xfer_submit(priv->xdev_hndl, priv->c2h_ch, false, pos, &sgt, false, 1000);
 		if ((ssize_t)got <= 0) {
 			/* idle briefly to avoid tight loop */
 			msleep(1);
