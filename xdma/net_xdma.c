@@ -14,11 +14,16 @@
 #include <linux/scatterlist.h>
 #include <linux/ip.h>
 #include <linux/if_arp.h>
+#include <linux/icmp.h>
 #include "libxdma_api.h"
 
 static bool netxdma_param_lo = false;
 module_param_named(lo, netxdma_param_lo, bool, 0644);
 MODULE_PARM_DESC(lo, "Rewrite RX dst/src MAC and IPv4 to loopback");
+
+static bool netxdma_param_debug = false;
+module_param_named(debug, netxdma_param_debug, bool, 0644);
+MODULE_PARM_DESC(debug, "Enable debug output for performance monitoring");
 
 struct net_xdma_priv {
 	struct net_device *netdev;
@@ -29,6 +34,11 @@ struct net_xdma_priv {
 	struct task_struct *tx_thread;
 	struct sk_buff_head txq;
 	bool stopping;
+	/* Performance monitoring */
+	u64 rx_packets_processed;
+	u64 tx_packets_processed;
+	u64 icmp_requests_handled;
+	u64 arp_requests_handled;
 };
 
 static void net_xdma_rewrite_headers(struct net_xdma_priv *priv,
@@ -52,6 +62,19 @@ static void net_xdma_rewrite_headers(struct net_xdma_priv *priv,
 			iph->check = 0;
 			iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
+			
+			/* Handle ICMP echo request directly for lower latency */
+			if (iph->protocol == IPPROTO_ICMP) {
+				struct icmphdr *icmph = (struct icmphdr *)((u8 *)iph + (iph->ihl << 2));
+				if ((u8 *)icmph + sizeof(struct icmphdr) <= skb_tail_pointer(skb) &&
+				    icmph->type == ICMP_ECHO) {
+					/* Convert echo request to echo reply */
+					icmph->type = ICMP_ECHOREPLY;
+					icmph->checksum = 0;
+					icmph->checksum = ip_compute_csum(icmph, skb->len - ((u8 *)icmph - skb->data));
+					priv->icmp_requests_handled++;
+				}
+			}
 		}
 	} else if (eth->h_proto == htons(ETH_P_ARP)) {
 		struct arphdr *arph = (struct arphdr *)(skb->data + sizeof(struct ethhdr));
@@ -87,6 +110,7 @@ static void net_xdma_rewrite_headers(struct net_xdma_priv *priv,
 		arph->ar_op = htons(ARPOP_REPLY);
 		ether_addr_copy(sha, priv->netdev->dev_addr);
 		ether_addr_copy(tha, priv->netdev->dev_addr);
+		priv->arp_requests_handled++;
 	}
 }
 
@@ -104,6 +128,13 @@ static void net_xdma_rx_push(struct net_xdma_priv *priv, void *data, size_t len)
 	netif_rx(skb);
 	priv->netdev->stats.rx_packets++;
 	priv->netdev->stats.rx_bytes += len;
+	priv->rx_packets_processed++;
+	
+	/* Debug output every 1000 packets */
+	if (netxdma_param_debug && (priv->rx_packets_processed % 1000 == 0)) {
+		pr_info("net_xdma: RX processed %llu packets, ICMP handled %llu, ARP handled %llu\n",
+			priv->rx_packets_processed, priv->icmp_requests_handled, priv->arp_requests_handled);
+	}
 }
 
 static int net_xdma_tx_send_buf(struct net_xdma_priv *priv,
@@ -141,7 +172,7 @@ static int net_xdma_tx_thread(void *data)
 		skb = skb_dequeue(&p->txq);
 		if (!skb) {
 			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(msecs_to_jiffies(10));
+			schedule_timeout(msecs_to_jiffies(1));  /* 减少到1ms */
 			continue;
 		}
 
@@ -153,6 +184,7 @@ static int net_xdma_tx_thread(void *data)
 
 		p->netdev->stats.tx_packets++;
 		p->netdev->stats.tx_bytes += skb->len;
+		p->tx_packets_processed++;
 		dev_kfree_skb(skb);
 		if (netif_queue_stopped(p->netdev) && skb_queue_len(&p->txq) < 512)
 			netif_wake_queue(p->netdev);
@@ -196,8 +228,8 @@ static int net_xdma_rx_thread(void *data)
 		/* Perform C2H DMA read into kbuf */
 		got = xdma_xfer_submit(priv->xdev_hndl, priv->c2h_ch, false, pos, &sgt, false, 1000);
 		if ((ssize_t)got <= 0) {
-			/* idle briefly to avoid tight loop */
-			msleep(1);
+			/* Use usleep for lower latency instead of msleep */
+			usleep_range(100, 500);  /* 100-500微秒，比1ms快很多 */
 			continue;
 		}
 
