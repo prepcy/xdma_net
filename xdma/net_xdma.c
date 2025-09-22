@@ -18,6 +18,9 @@
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <linux/workqueue.h>
+#include <linux/sched.h>
+#include <linux/sched/types.h>
+#include <linux/cpumask.h>
 #include "libxdma_api.h"
 
 static bool netxdma_param_lo = true;
@@ -55,6 +58,7 @@ struct net_xdma_priv {
 	struct hrtimer tx_agg_timer;
 	bool tx_timer_active;
 	struct work_struct tx_agg_work;
+	struct workqueue_struct *tx_wq;
 
 	/* RX 64KB block buffer and reusable SG - multi channel */
 	struct page **rx_blk_pages;
@@ -129,7 +133,10 @@ static enum hrtimer_restart net_xdma_tx_timer_fn(struct hrtimer *t)
 {
 	struct net_xdma_priv *priv = container_of(t, struct net_xdma_priv, tx_agg_timer);
 	/* Defer flush to process context to avoid sleeping in hardirq */
-	schedule_work(&priv->tx_agg_work);
+	if (likely(priv->tx_wq))
+		queue_work(priv->tx_wq, &priv->tx_agg_work);
+	else
+		schedule_work(&priv->tx_agg_work);
 	/* One-shot timer */
 	priv->tx_timer_active = false;
 	return HRTIMER_NORESTART;
@@ -401,9 +408,6 @@ static int net_xdma_rx_thread(void *data)
 				net_xdma_rx_push(priv, (u8 *)priv->rx_blk_virt[ch_idx] + offset + 2, slen);
 				offset += slot;
 			}
-			/* Clear processed region to avoid re-parsing stale slots on partial overwrites */
-			if (max > 0)
-				memset(priv->rx_blk_virt[ch_idx], 0, max);
 		}
 	}
 	return 0;
@@ -427,9 +431,11 @@ static netdev_tx_t net_xdma_start_xmit(struct sk_buff *skb, struct net_device *n
 	/* allocate next slot; if full, flush first */
 	if (priv->tx_agg_slot_count >= priv->tx_agg_capacity) {
 		spin_unlock_irqrestore(&priv->tx_agg_lock, flags);
-		/* schedule flush in process context to avoid sleeping in atomic */
 		netif_stop_queue(ndev);
-		schedule_work(&priv->tx_agg_work);
+		if (likely(priv->tx_wq))
+			queue_work(priv->tx_wq, &priv->tx_agg_work);
+		else
+			schedule_work(&priv->tx_agg_work);
 		/* free skb and return early; flush will run asynchronously */
 		dev_kfree_skb_any(skb);
 		return NETDEV_TX_OK;
@@ -458,7 +464,10 @@ static netdev_tx_t net_xdma_start_xmit(struct sk_buff *skb, struct net_device *n
 	if (priv->tx_agg_slot_count >= priv->tx_agg_capacity) {
 		spin_unlock_irqrestore(&priv->tx_agg_lock, flags);
 		netif_stop_queue(ndev);
-		schedule_work(&priv->tx_agg_work);
+		if (likely(priv->tx_wq))
+			queue_work(priv->tx_wq, &priv->tx_agg_work);
+		else
+			schedule_work(&priv->tx_agg_work);
 	} else {
 		spin_unlock_irqrestore(&priv->tx_agg_lock, flags);
 	}
@@ -492,6 +501,14 @@ static int net_xdma_open(struct net_device *ndev)
 		if (IS_ERR(priv->rx_thread[i])) {
 			kfree(thread_data);
 			return PTR_ERR(priv->rx_thread[i]);
+		}
+
+		/* Bind CPU and set SCHED_FIFO for lower latency */
+		{
+			struct sched_param sp = { .sched_priority = 20 };
+			int cpu = i % num_online_cpus();
+			set_cpus_allowed_ptr(priv->rx_thread[i], cpumask_of(cpu));
+			sched_setscheduler_nocheck(priv->rx_thread[i], SCHED_FIFO, &sp);
 		}
 	}
 	
@@ -594,6 +611,8 @@ int net_xdma_register(void *xdev_hndl)
 	hrtimer_init(&priv->tx_agg_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
 	priv->tx_agg_timer.function = net_xdma_tx_timer_fn;
 	INIT_WORK(&priv->tx_agg_work, net_xdma_tx_agg_workfn);
+	/* dedicated high-priority unbound workqueue */
+	priv->tx_wq = alloc_workqueue("netxdma_tx_wq", WQ_HIGHPRI | WQ_UNBOUND, 0);
 
 	/* init RX 64KB block buffer and SG - multi channel */
 	priv->rx_blk_size = 64 * 1024;
@@ -691,6 +710,11 @@ void net_xdma_unregister(void)
 		flush_work(&priv->tx_agg_work);
 		kfree(priv->tx_agg_bufs[0]);
 		kfree(priv->tx_agg_bufs[1]);
+		if (priv->tx_wq) {
+			flush_workqueue(priv->tx_wq);
+			destroy_workqueue(priv->tx_wq);
+			priv->tx_wq = NULL;
+		}
 		
 		/* free RX 64KB block resources - multi channel */
 		if (priv->rx_blk_sgt && priv->rx_blk_pages && priv->num_channels > 0) {
