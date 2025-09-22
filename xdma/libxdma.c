@@ -376,7 +376,7 @@ static int engine_reg_dump(struct xdma_engine *engine)
 	}
 
 	w = read_register(&engine->regs->identifier);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (id).\n", engine->name,
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (id).\n", engine->name,
 		&engine->regs->identifier, w);
 	w &= BLOCK_ID_MASK;
 	if (w != BLOCK_ID_HEAD) {
@@ -386,25 +386,25 @@ static int engine_reg_dump(struct xdma_engine *engine)
 	}
 	/* extra debugging; inspect complete engine set of registers */
 	w = read_register(&engine->regs->status);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (status).\n", engine->name,
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (status).\n", engine->name,
 		&engine->regs->status, w);
 	w = read_register(&engine->regs->control);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (control)\n", engine->name,
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (control)\n", engine->name,
 		&engine->regs->control, w);
 	w = read_register(&engine->sgdma_regs->first_desc_lo);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_lo)\n", engine->name,
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (first_desc_lo)\n", engine->name,
 		&engine->sgdma_regs->first_desc_lo, w);
 	w = read_register(&engine->sgdma_regs->first_desc_hi);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_hi)\n", engine->name,
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (first_desc_hi)\n", engine->name,
 		&engine->sgdma_regs->first_desc_hi, w);
 	w = read_register(&engine->sgdma_regs->first_desc_adjacent);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_adjacent).\n",
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (first_desc_adjacent).\n",
 		engine->name, &engine->sgdma_regs->first_desc_adjacent, w);
 	w = read_register(&engine->regs->completed_desc_count);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (completed_desc_count).\n",
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (completed_desc_count).\n",
 		engine->name, &engine->regs->completed_desc_count, w);
 	w = read_register(&engine->regs->interrupt_enable_mask);
-	pr_info("%s: ioread32(0x%p) = 0x%08x (interrupt_enable_mask)\n",
+	dbg_tfr("%s: ioread32(0x%p) = 0x%08x (interrupt_enable_mask)\n",
 		engine->name, &engine->regs->interrupt_enable_mask, w);
 
 	return 0;
@@ -494,7 +494,7 @@ static void engine_status_dump(struct xdma_engine *engine)
 	}
 
 	buf[len - 1] = '\0';
-	pr_info("%s\n", buffer);
+	dbg_tfr("%s\n", buffer);
 }
 
 /**
@@ -2421,7 +2421,7 @@ static int transfer_abort(struct xdma_engine *engine,
 		return -EINVAL;
 	}
 
-	pr_info("abort transfer 0x%p, desc %d, engine desc queued %d.\n",
+	dbg_tfr("abort transfer 0x%p, desc %d, engine desc queued %d.\n",
 		transfer, transfer->desc_num, engine->desc_dequeued);
 
 	head = list_entry(engine->transfer_list.next, struct xdma_transfer,
@@ -3636,7 +3636,7 @@ ssize_t xdma_xfer_submit(void *dev_hndl, int channel, bool write, u64 ep_addr,
 			break;
 		default:
 			/* transfer can still be in-flight */
-			pr_info("xfer 0x%p,%u, s 0x%x timed out, ep 0x%llx.\n",
+			dbg_tfr("xfer 0x%p,%u, s 0x%x timed out, ep 0x%llx.\n",
 				xfer, xfer->len, xfer->state, req->ep_addr);
 			rv = engine_status_read(engine, 0, 1);
 			if (rv < 0) {
